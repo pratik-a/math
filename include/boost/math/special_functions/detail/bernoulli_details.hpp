@@ -14,8 +14,11 @@
 #include <boost/math/tools/config.hpp>
 #include <boost/math/special_functions/fpclassify.hpp>
 #include <vector>
-#include <mutex>
 #include <type_traits>
+
+#ifdef BOOST_HAS_THREADS
+#include <mutex>
+#endif
 
 namespace boost{ namespace math{ namespace detail{
 //
@@ -72,7 +75,7 @@ T t2n_asymptotic(int n)
 //
 struct max_bernoulli_root_functor
 {
-   max_bernoulli_root_functor(ulong_long_type t) : target(static_cast<double>(t)) {}
+   max_bernoulli_root_functor(unsigned long long t) : target(static_cast<double>(t)) {}
    double operator()(double n)
    {
       BOOST_MATH_STD_USING
@@ -99,7 +102,7 @@ inline std::size_t find_bernoulli_overflow_limit(const std::false_type&)
    // Set a limit on how large the result can ever be:
    static const double max_result = static_cast<double>((std::numeric_limits<std::size_t>::max)() - 1000u);
 
-   ulong_long_type t = lltrunc(boost::math::tools::log_max_value<T>());
+   unsigned long long t = lltrunc(boost::math::tools::log_max_value<T>());
    max_bernoulli_root_functor fun(t);
    boost::math::tools::equal_floor tol;
    std::uintmax_t max_iter = boost::math::policies::get_max_root_iterations<Policy>();
@@ -143,39 +146,6 @@ inline T tangent_scale_factor()
 {
    return tools::min_value<T>() * 16;
 }
-//
-// Initializer: ensure all our constants are initialized prior to the first call of main:
-//
-template <class T, class Policy>
-struct bernoulli_initializer
-{
-   struct init
-   {
-      init()
-      {
-         //
-         // We call twice, once to initialize our static table, and once to
-         // initialize our dymanic table:
-         //
-         boost::math::bernoulli_b2n<T>(2, Policy());
-
-         try{
-            boost::math::bernoulli_b2n<T>(max_bernoulli_b2n<T>::value + 1, Policy());
-         } catch(const std::overflow_error&){}
-
-         boost::math::tangent_t2n<T>(2, Policy());
-      }
-      void force_instantiate()const{}
-   };
-   static const init initializer;
-   static void force_instantiate()
-   {
-      initializer.force_instantiate();
-   }
-};
-
-template <class T, class Policy>
-const typename bernoulli_initializer<T, Policy>::init bernoulli_initializer<T, Policy>::initializer;
 
 //
 // We need something to act as a cache for our calculated Bernoulli numbers.  In order to
@@ -389,26 +359,50 @@ public:
          }
          return out;
       }
+
+      #ifndef BOOST_HAS_THREADS
+      //
+      // Single threaded code, very simple:
+      //
+      if(m_current_precision < boost::math::tools::digits<T>())
+      {
+         bn.clear();
+         tn.clear();
+         m_intermediates.clear();
+         m_current_precision = boost::math::tools::digits<T>();
+      }
+      if(start + n >= bn.size())
+      {
+         std::size_t new_size = (std::min)((std::max)((std::max)(std::size_t(start + n), std::size_t(bn.size() + 20)), std::size_t(50)), std::size_t(bn.capacity()));
+         tangent_numbers_series(new_size);
+      }
+
+      for(std::size_t i = (std::max)(std::size_t(max_bernoulli_b2n<T>::value + 1), start); i < start + n; ++i)
+      {
+         *out = (i >= m_overflow_limit) ? policies::raise_overflow_error<T>("boost::math::bernoulli_b2n<%1%>(std::size_t)", 0, T(i), pol) : bn[i];
+         ++out;
+      }
+      #else
       //
       // Double-checked locking pattern, lets us access cached already cached values
       // without locking:
       //
       // Get the counter and see if we need to calculate more constants:
       //
-      if((static_cast<std::size_t>(m_counter.load(BOOST_MATH_ATOMIC_NS::memory_order_consume)) < start + n)
-         || (static_cast<int>(m_current_precision.load(BOOST_MATH_ATOMIC_NS::memory_order_consume)) < boost::math::tools::digits<T>()))
+      if((static_cast<std::size_t>(m_counter.load(std::memory_order_consume)) < start + n)
+         || (static_cast<int>(m_current_precision.load(std::memory_order_consume)) < boost::math::tools::digits<T>()))
       {
          std::lock_guard<std::mutex> l(m_mutex);
 
-         if((static_cast<std::size_t>(m_counter.load(BOOST_MATH_ATOMIC_NS::memory_order_consume)) < start + n)
-            || (static_cast<int>(m_current_precision.load(BOOST_MATH_ATOMIC_NS::memory_order_consume)) < boost::math::tools::digits<T>()))
+         if((static_cast<std::size_t>(m_counter.load(std::memory_order_consume)) < start + n)
+            || (static_cast<int>(m_current_precision.load(std::memory_order_consume)) < boost::math::tools::digits<T>()))
          {
-            if(static_cast<int>(m_current_precision.load(BOOST_MATH_ATOMIC_NS::memory_order_consume)) < boost::math::tools::digits<T>())
+            if(static_cast<int>(m_current_precision.load(std::memory_order_consume)) < boost::math::tools::digits<T>())
             {
                bn.clear();
                tn.clear();
                m_intermediates.clear();
-               m_counter.store(0, BOOST_MATH_ATOMIC_NS::memory_order_release);
+               m_counter.store(0, std::memory_order_release);
                m_current_precision = boost::math::tools::digits<T>();
             }
             if(start + n >= bn.size())
@@ -416,7 +410,7 @@ public:
                std::size_t new_size = (std::min)((std::max)((std::max)(std::size_t(start + n), std::size_t(bn.size() + 20)), std::size_t(50)), std::size_t(bn.capacity()));
                tangent_numbers_series(new_size);
             }
-            m_counter.store(static_cast<atomic_integer_type>(bn.size()), BOOST_MATH_ATOMIC_NS::memory_order_release);
+            m_counter.store(static_cast<atomic_integer_type>(bn.size()), std::memory_order_release);
          }
       }
 
@@ -426,6 +420,7 @@ public:
          ++out;
       }
 
+      #endif // BOOST_HAS_THREADS
       return out;
    }
 
@@ -468,26 +463,58 @@ public:
          }
          return out;
       }
+
+      #ifndef BOOST_HAS_THREADS
+      //
+      // Single threaded code, very simple:
+      //
+      if(m_current_precision < boost::math::tools::digits<T>())
+      {
+         bn.clear();
+         tn.clear();
+         m_intermediates.clear();
+         m_current_precision = boost::math::tools::digits<T>();
+      }
+      if(start + n >= bn.size())
+      {
+         std::size_t new_size = (std::min)((std::max)((std::max)(start + n, std::size_t(bn.size() + 20)), std::size_t(50)), std::size_t(bn.capacity()));
+         tangent_numbers_series(new_size);
+      }
+
+      for(std::size_t i = start; i < start + n; ++i)
+      {
+         if(i >= m_overflow_limit)
+            *out = policies::raise_overflow_error<T>("boost::math::bernoulli_b2n<%1%>(std::size_t)", 0, T(i), pol);
+         else
+         {
+            if(tools::max_value<T>() * tangent_scale_factor<T>() < tn[static_cast<typename container_type::size_type>(i)])
+               *out = policies::raise_overflow_error<T>("boost::math::bernoulli_b2n<%1%>(std::size_t)", 0, T(i), pol);
+            else
+               *out = tn[static_cast<typename container_type::size_type>(i)] / tangent_scale_factor<T>();
+         }
+         ++out;
+      }
+      #else
       //
       // Double-checked locking pattern, lets us access cached already cached values
       // without locking:
       //
       // Get the counter and see if we need to calculate more constants:
       //
-      if((static_cast<std::size_t>(m_counter.load(BOOST_MATH_ATOMIC_NS::memory_order_consume)) < start + n)
-         || (static_cast<int>(m_current_precision.load(BOOST_MATH_ATOMIC_NS::memory_order_consume)) < boost::math::tools::digits<T>()))
+      if((static_cast<std::size_t>(m_counter.load(std::memory_order_consume)) < start + n)
+         || (static_cast<int>(m_current_precision.load(std::memory_order_consume)) < boost::math::tools::digits<T>()))
       {
          std::lock_guard<std::mutex> l(m_mutex);
 
-         if((static_cast<std::size_t>(m_counter.load(BOOST_MATH_ATOMIC_NS::memory_order_consume)) < start + n)
-            || (static_cast<int>(m_current_precision.load(BOOST_MATH_ATOMIC_NS::memory_order_consume)) < boost::math::tools::digits<T>()))
+         if((static_cast<std::size_t>(m_counter.load(std::memory_order_consume)) < start + n)
+            || (static_cast<int>(m_current_precision.load(std::memory_order_consume)) < boost::math::tools::digits<T>()))
          {
-            if(static_cast<int>(m_current_precision.load(BOOST_MATH_ATOMIC_NS::memory_order_consume)) < boost::math::tools::digits<T>())
+            if(static_cast<int>(m_current_precision.load(std::memory_order_consume)) < boost::math::tools::digits<T>())
             {
                bn.clear();
                tn.clear();
                m_intermediates.clear();
-               m_counter.store(0, BOOST_MATH_ATOMIC_NS::memory_order_release);
+               m_counter.store(0, std::memory_order_release);
                m_current_precision = boost::math::tools::digits<T>();
             }
             if(start + n >= bn.size())
@@ -495,7 +522,7 @@ public:
                std::size_t new_size = (std::min)((std::max)((std::max)(start + n, std::size_t(bn.size() + 20)), std::size_t(50)), std::size_t(bn.capacity()));
                tangent_numbers_series(new_size);
             }
-            m_counter.store(static_cast<atomic_integer_type>(bn.size()), BOOST_MATH_ATOMIC_NS::memory_order_release);
+            m_counter.store(static_cast<atomic_integer_type>(bn.size()), std::memory_order_release);
          }
       }
 
@@ -513,6 +540,7 @@ public:
          ++out;
       }
 
+      #endif // BOOST_HAS_THREADS
       return out;
    }
 
@@ -526,18 +554,37 @@ private:
    std::vector<T> m_intermediates;
    // The value at which we know overflow has already occurred for the Bn:
    std::size_t m_overflow_limit;
+
+   #ifdef BOOST_HAS_THREADS
    std::mutex m_mutex;
    atomic_counter_type m_counter, m_current_precision;
+   #else
+   int m_counter;
+   int m_current_precision;
+   #endif // BOOST_HAS_THREADS
 };
 
 template <class T, class Policy>
-inline bernoulli_numbers_cache<T, Policy>& get_bernoulli_numbers_cache()
+inline typename std::enable_if<(std::numeric_limits<T>::digits == 0) || (std::numeric_limits<T>::digits >= INT_MAX), bernoulli_numbers_cache<T, Policy>&>::type get_bernoulli_numbers_cache()
 {
    //
-   // Force this function to be called at program startup so all the static variables
-   // get initialized then (thread safety).
+   // When numeric_limits<>::digits is zero, the type has either not specialized numeric_limits at all
+   // or it's precision can vary at runtime.  So make the cache thread_local so that each thread can
+   // have it's own precision if required:
    //
-   bernoulli_initializer<T, Policy>::force_instantiate();
+   static 
+#ifndef BOOST_MATH_NO_THREAD_LOCAL_WITH_NON_TRIVIAL_TYPES
+      BOOST_MATH_THREAD_LOCAL
+#endif
+      bernoulli_numbers_cache<T, Policy> data;
+   return data;
+}
+template <class T, class Policy>
+inline typename std::enable_if<std::numeric_limits<T>::digits && (std::numeric_limits<T>::digits < INT_MAX), bernoulli_numbers_cache<T, Policy>&>::type get_bernoulli_numbers_cache()
+{
+   //
+   // Note that we rely on C++11 thread-safe initialization here:
+   //
    static bernoulli_numbers_cache<T, Policy> data;
    return data;
 }

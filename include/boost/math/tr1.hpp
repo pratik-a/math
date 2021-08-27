@@ -15,6 +15,7 @@
 
 #ifdef __cplusplus
 
+#include <boost/math/tools/is_standalone.hpp>
 #include <boost/math/tools/assert.hpp>
 
 namespace boost{ namespace math{ namespace tr1{ extern "C"{
@@ -109,7 +110,7 @@ namespace boost{ namespace math{ namespace tr1{ extern "C"{
 #error Auto linking not supported in standalone mode.
 #endif // BOOST_MATH_STANDALONE
 
-#if !(defined(BOOST_INTEL) && defined(__APPLE__)) && !(defined(__FLT_EVAL_METHOD__) && !defined(__cplusplus))
+#if !(defined(__INTEL_COMPILER) && defined(__APPLE__)) && !(defined(__FLT_EVAL_METHOD__) && !defined(__cplusplus))
 #if !defined(FLT_EVAL_METHOD)
 typedef float float_t;
 typedef double double_t;
